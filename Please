@@ -1,0 +1,828 @@
+Great — thanks for the screenshots. I can see your backend uses:
+
+POST http://localhost:9191/api/accounts/deposit with body { accNo, amount } → returns new balance
+
+POST http://localhost:9191/api/accounts/withdraw with body { accNo, amount } → returns new balance
+
+
+Using that, I built a complete Customer frontend module in the same pattern as your RM/BM/BE dashboards. I made reasonable assumptions for a few endpoints that weren’t shown (I call them out so you can tweak if your backend path differs). Place these files into your banking-frontend/src folder (matching your structure: src/pages, src/api, etc.) and import/register the routes the same way your other dashboards are registered.
+
+
+---
+
+Quick notes / assumptions (important)
+
+1. API base: http://localhost:9191 (from your screenshots).
+
+
+2. Authentication token stored as accessToken in localStorage. Role and userId stored as role and userId. fullName is stored on login (matching your admin-login screenshot).
+
+
+3. Deposit/Withdraw endpoints exactly as your screenshot:
+
+POST /api/accounts/deposit -> body { accNo, amount }
+
+POST /api/accounts/withdraw -> body { accNo, amount }
+
+
+
+4. I assumed standard endpoints for other functions. If a path differs, change the URL in src/api/customerApi.js accordingly (I marked them).
+
+
+5. CORS: your backend must permit calls from the frontend origin (you mentioned CORS is already handled). If you still see CORS errors, ensure backend allows http://localhost:5173 (or whatever your dev port is) and that Authorization header is allowed.
+
+
+6. UI: I followed the style/pattern used in your BE/RM components (simple buttons, inline styles). You can replace with CSS classes or tailwind.
+
+
+
+
+---
+
+Files to add / replace
+
+1) src/api/axios.js
+
+// src/api/axios.js
+import axios from "axios";
+
+export const API_BASE = "http://localhost:9191";
+
+const instance = axios.create({
+  baseURL: API_BASE + "/api",
+  timeout: 15000,
+});
+
+// attach bearer token automatically if present
+instance.interceptors.request.use((config) => {
+  const token = localStorage.getItem("accessToken");
+  if (token) {
+    config.headers = config.headers || {};
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
+export default instance;
+
+
+---
+
+2) src/api/customerApi.js
+
+// src/api/customerApi.js
+import api, { API_BASE } from "./axios";
+
+/*
+  Endpoints used (adjust if your backend differs):
+  - GET /customers                -> list of customers (BE helpers)
+  - GET /customers/{custId}       -> customer detail
+  - GET /accounts/customer/{userId} -> accounts for a user (match your backend)
+  - GET /accounts/mini-statement/{accNo} -> last N transactions for account
+  - POST /accounts/deposit        -> { accNo, amount } returns new balance
+  - POST /accounts/withdraw       -> { accNo, amount } returns new balance
+  - POST /accounts/transfer       -> { fromAcc, toAcc, amount } -> response
+  - POST /customers/change-password -> handled by change password page
+*/
+
+export const getAllCustomers = () => api.get("/customers");
+
+export const getCustomerByCustId = (custId) => api.get(`/customers/${custId}`);
+
+// accounts by user id - your backend used 'customer' in screenshot
+export const getAccountsByUserId = (userId) =>
+  api.get(`/accounts/customer/${userId}`);
+
+// mini statement - adjust path to your actual backend if needed
+export const getMiniStatement = (accNo) =>
+  api.get(`/accounts/mini-statement/${accNo}`);
+
+// deposit / withdraw (you've confirmed these)
+export const deposit = ({ accNo, amount }) =>
+  api.post("/accounts/deposit", { accNo, amount });
+
+export const withdraw = ({ accNo, amount }) =>
+  api.post("/accounts/withdraw", { accNo, amount });
+
+// transfer (assumed; change if different)
+export const transfer = ({ fromAcc, toAcc, amount }) =>
+  api.post("/accounts/transfer", { fromAcc, toAcc, amount });
+
+// change password (customer)
+export const changePassword = (payload) =>
+  api.post("/customers/change-password", payload);
+
+
+---
+
+3) src/pages/CustomerLogin.jsx
+
+// src/pages/CustomerLogin.jsx
+import React, { useState } from "react";
+import axiosInstance from "../api/axios"; // instance defined earlier
+import { useNavigate } from "react-router-dom";
+
+export default function CustomerLogin() {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const navigate = useNavigate();
+
+  async function loginHandler() {
+    try {
+      const res = await axiosInstance.post("/auth/login", { username, password });
+      // backend response shape in your screenshot included: accessToken, userId, fullName, role
+      const data = res.data;
+      localStorage.setItem("accessToken", data.accessToken || data.token || "");
+      localStorage.setItem("refreshToken", data.refreshToken || "");
+      localStorage.setItem("userId", data.userId || "");
+      localStorage.setItem("fullName", data.fullName || data.fullname || data.username || "");
+      localStorage.setItem("role", data.role || "Customer");
+
+      // decide where to go
+      // If backend returns a flag that the password is temporary, you should detect it. If backend doesn't return, we will try a safe flow:
+      // if password equals "temp..." you could force change. Here I'll redirect to change-password route only when backend signals it (res.data.tempPassword === true)
+      if (data.tempPassword === true || data.message === "TempPassword") {
+        navigate("/customer/change-password");
+      } else {
+        navigate("/customer-dashboard");
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Invalid credentials or server error");
+    }
+  }
+
+  return (
+    <div style={{ textAlign: "center", marginTop: 100 }}>
+      <h2>Login as CUSTOMER</h2>
+      <div style={{ marginTop: 20 }}>
+        <input placeholder="Username" onChange={(e) => setUsername(e.target.value)} />
+      </div>
+      <div style={{ marginTop: 10 }}>
+        <input
+          type="password"
+          placeholder="Password"
+          onChange={(e) => setPassword(e.target.value)}
+        />
+      </div>
+      <div style={{ marginTop: 12 }}>
+        <button onClick={loginHandler}>Login</button>
+      </div>
+    </div>
+  );
+}
+
+
+---
+
+4) src/pages/CustomerPasswordChange.jsx
+
+// src/pages/CustomerPasswordChange.jsx
+import React, { useState } from "react";
+import { changePassword } from "../api/customerApi";
+import { useNavigate } from "react-router-dom";
+
+export default function CustomerPasswordChange() {
+  const [usernameOrAcc, setUsernameOrAcc] = useState("");
+  const [oldPassword, setOldPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const navigate = useNavigate();
+
+  async function handleChange() {
+    try {
+      // API: /customers/change-password
+      await changePassword({
+        username: usernameOrAcc,
+        oldPassword,
+        newPassword,
+      });
+      alert("Password changed. Please login with new password.");
+      navigate("/login?role=CUSTOMER");
+    } catch (err) {
+      console.error(err);
+      alert("Failed to change password");
+    }
+  }
+
+  return (
+    <div style={{ textAlign: "center", marginTop: 60 }}>
+      <h2>Change Password</h2>
+      <div style={{ marginTop: 12 }}>
+        <input placeholder="username or account no" onChange={(e) => setUsernameOrAcc(e.target.value)} />
+      </div>
+      <div style={{ marginTop: 12 }}>
+        <input type="password" placeholder="old password" onChange={(e) => setOldPassword(e.target.value)} />
+      </div>
+      <div style={{ marginTop: 12 }}>
+        <input type="password" placeholder="new password" onChange={(e) => setNewPassword(e.target.value)} />
+      </div>
+      <div style={{ marginTop: 12 }}>
+        <button onClick={handleChange}>Change Password</button>
+      </div>
+    </div>
+  );
+}
+
+
+---
+
+5) src/pages/Customer_Dashboard.jsx
+
+// src/pages/Customer_Dashboard.jsx
+import React, { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import {
+  getAccountsByUserId,
+  getCustomerByCustId,
+  getAllCustomers,
+} from "../api/customerApi";
+
+export default function Customer_Dashboard() {
+  const navigate = useNavigate();
+  const [custId, setCustId] = useState(null); // resolved custId
+  const [customer, setCustomer] = useState(null);
+  const [accounts, setAccounts] = useState([]);
+  const userId = Number(localStorage.getItem("userId"));
+
+  useEffect(() => {
+    const load = async () => {
+      if (!userId) {
+        navigate("/login?role=CUSTOMER");
+        return;
+      }
+
+      try {
+        // 1) get all customers to resolve custId from userId (like your BE code)
+        const resAll = await getAllCustomers();
+        const list = resAll.data || [];
+        const row = list.find((c) => (c.userId ?? c.user_id ?? c.userid) === userId);
+        if (!row) {
+          alert("Customer row not found for current user");
+          return;
+        }
+        const id = row.custId ?? row.cust_id ?? row.id;
+        setCustId(id);
+
+        // 2) load customer details
+        try {
+          const resCust = await getCustomerByCustId(id);
+          setCustomer(resCust.data);
+        } catch (e) {
+          // ignore detail failure but log
+          console.error("failed getCustomerByCustId", e);
+        }
+
+        // 3) load accounts for this user id
+        try {
+          const accRes = await getAccountsByUserId(userId);
+          setAccounts(accRes.data || []);
+        } catch (e) {
+          console.error("failed getAccountsByUserId", e);
+        }
+      } catch (err) {
+        console.error(err);
+        alert("Failed to load customer data");
+      }
+    };
+
+    load();
+  }, [userId, navigate]);
+
+  function logout() {
+    localStorage.removeItem("accessToken");
+    localStorage.removeItem("refreshToken");
+    localStorage.removeItem("role");
+    localStorage.removeItem("userId");
+    localStorage.removeItem("fullName");
+    navigate("/login");
+  }
+
+  return (
+    <div style={{ padding: 20 }}>
+      <h2>Customer Dashboard</h2>
+      <p>Welcome, {localStorage.getItem("fullName") || (customer && customer.fullName)}</p>
+
+      <div style={{ marginTop: 16 }}>
+        <button onClick={() => navigate("/profile")}>Profile</button>
+        <button style={{ marginLeft: 8 }} onClick={() => navigate("/customer/accounts")}>
+          View Accounts
+        </button>
+        <button style={{ marginLeft: 8 }} onClick={() => navigate("/customer/mini-statement")}>
+          Mini Statement
+        </button>
+        <button style={{ marginLeft: 8 }} onClick={() => navigate("/customer/deposit")}>
+          Deposit
+        </button>
+        <button style={{ marginLeft: 8 }} onClick={() => navigate("/customer/withdraw")}>
+          Withdraw
+        </button>
+        <button style={{ marginLeft: 8 }} onClick={() => navigate("/customer/transfer")}>
+          Transfer
+        </button>
+        <button style={{ marginLeft: 8 }} onClick={logout}>
+          Logout
+        </button>
+      </div>
+
+      <div style={{ marginTop: 24 }}>
+        <h3>Your Accounts</h3>
+        {accounts.length === 0 ? (
+          <div>No accounts found</div>
+        ) : (
+          <table border="1" cellPadding="8">
+            <thead>
+              <tr>
+                <th>Account No</th>
+                <th>Type</th>
+                <th>Balance</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {accounts.map((a) => (
+                <tr key={a.accountNo || a.accNo || a.accno || a.id}>
+                  <td>{a.accountNo ?? a.accNo ?? a.accno}</td>
+                  <td>{a.type ?? a.accountType ?? "—"}</td>
+                  <td>{a.balance ?? a.currentBalance ?? "0"}</td>
+                  <td>
+                    <button onClick={() => navigate(`/customer/account/${a.accountNo ?? a.accNo ?? a.accno}`)}>
+                      View
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+---
+
+6) src/pages/ViewAccount.jsx
+
+// src/pages/ViewAccount.jsx
+import React, { useEffect, useState } from "react";
+import { useParams, useNavigate } from "react-router-dom";
+import { getMiniStatement } from "../api/customerApi";
+
+export default function ViewAccount() {
+  const { accNo } = useParams();
+  const [transactions, setTransactions] = useState([]);
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const res = await getMiniStatement(accNo);
+        setTransactions(res.data || []);
+      } catch (err) {
+        console.error(err);
+        alert("Failed to load mini statement");
+      }
+    }
+    if (accNo) load();
+  }, [accNo]);
+
+  return (
+    <div style={{ padding: 20 }}>
+      <h3>Account {accNo}</h3>
+      <button onClick={() => navigate(-1)}>Back</button>
+      <div style={{ marginTop: 12 }}>
+        <h4>Last transactions</h4>
+        {transactions.length === 0 ? (
+          <div>No transactions</div>
+        ) : (
+          <table border="1" cellPadding="8">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Type</th>
+                <th>Amount</th>
+                <th>Balance</th>
+              </tr>
+            </thead>
+            <tbody>
+              {transactions.map((t, idx) => (
+                <tr key={idx}>
+                  <td>{t.date ?? t.txnDate}</td>
+                  <td>{t.type ?? (t.credit ? "Cr" : "Db")}</td>
+                  <td>{t.amount}</td>
+                  <td>{t.postBalance ?? t.finalBalance}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+---
+
+7) src/pages/MiniStatement.jsx (simple print)
+
+// src/pages/MiniStatement.jsx
+import React, { useEffect, useState } from "react";
+import { getAccountsByUserId, getMiniStatement } from "../api/customerApi";
+
+export default function MiniStatement() {
+  const userId = Number(localStorage.getItem("userId"));
+  const [accounts, setAccounts] = useState([]);
+  const [selectedAcc, setSelectedAcc] = useState("");
+  const [txns, setTxns] = useState([]);
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const res = await getAccountsByUserId(userId);
+        setAccounts(res.data || []);
+        if ((res.data || []).length) {
+          setSelectedAcc(res.data[0].accountNo ?? res.data[0].accNo);
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    }
+    load();
+  }, [userId]);
+
+  useEffect(() => {
+    if (!selectedAcc) return;
+    async function loadTx() {
+      try {
+        const r = await getMiniStatement(selectedAcc);
+        setTxns(r.data || []);
+      } catch (err) {
+        console.error(err);
+      }
+    }
+    loadTx();
+  }, [selectedAcc]);
+
+  function print() {
+    window.print();
+  }
+
+  return (
+    <div style={{ padding: 20 }}>
+      <h3>Mini Statement</h3>
+      <div>
+        <label>Account: </label>
+        <select value={selectedAcc} onChange={(e) => setSelectedAcc(e.target.value)}>
+          <option value="">--choose--</option>
+          {accounts.map((a) => (
+            <option key={a.accountNo ?? a.accNo} value={a.accountNo ?? a.accNo}>
+              {a.accountNo ?? a.accNo}
+            </option>
+          ))}
+        </select>
+        <button onClick={print} style={{ marginLeft: 8 }}>
+          Print
+        </button>
+      </div>
+
+      <div style={{ marginTop: 12 }}>
+        <table border="1" cellPadding="8">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Time</th>
+              <th>Cr/Dr</th>
+              <th>Amount</th>
+              <th>Final Balance</th>
+            </tr>
+          </thead>
+          <tbody>
+            {txns.map((t, idx) => (
+              <tr key={idx}>
+                <td>{t.date ?? t.txnDate}</td>
+                <td>{t.time ?? ""}</td>
+                <td>{t.type ?? (t.credit ? "Cr" : "Db")}</td>
+                <td>{t.amount}</td>
+                <td>{t.postBalance ?? t.finalBalance}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+
+---
+
+8) src/pages/Deposit.jsx
+
+// src/pages/Deposit.jsx
+import React, { useState, useEffect } from "react";
+import { getAccountsByUserId, deposit } from "../api/customerApi";
+import { useNavigate } from "react-router-dom";
+
+export default function Deposit() {
+  const userId = Number(localStorage.getItem("userId"));
+  const [accounts, setAccounts] = useState([]);
+  const [accNo, setAccNo] = useState("");
+  const [amount, setAmount] = useState("");
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const r = await getAccountsByUserId(userId);
+        setAccounts(r.data || []);
+        if ((r.data || []).length) setAccNo(r.data[0].accountNo ?? r.data[0].accNo);
+      } catch (err) {
+        console.error(err);
+      }
+    }
+    load();
+  }, [userId]);
+
+  async function handleDeposit() {
+    try {
+      const res = await deposit({ accNo, amount });
+      alert("Deposit successful. New balance: " + res.data);
+      navigate("/customer-dashboard");
+    } catch (err) {
+      console.error(err);
+      alert("Deposit failed");
+    }
+  }
+
+  return (
+    <div style={{ padding: 20 }}>
+      <h3>Deposit</h3>
+      <div>
+        <label>Account</label>
+        <select value={accNo} onChange={(e) => setAccNo(e.target.value)}>
+          <option value="">--choose--</option>
+          {accounts.map((a) => (
+            <option key={a.accountNo ?? a.accNo} value={a.accountNo ?? a.accNo}>
+              {a.accountNo ?? a.accNo} - {a.balance ?? a.currentBalance}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div style={{ marginTop: 8 }}>
+        <input placeholder="Amount" value={amount} onChange={(e) => setAmount(e.target.value)} />
+      </div>
+      <div style={{ marginTop: 12 }}>
+        <button onClick={handleDeposit}>Submit Deposit</button>
+      </div>
+    </div>
+  );
+}
+
+
+---
+
+9) src/pages/Withdraw.jsx
+
+// src/pages/Withdraw.jsx
+import React, { useState, useEffect } from "react";
+import { getAccountsByUserId, withdraw } from "../api/customerApi";
+import { useNavigate } from "react-router-dom";
+
+export default function Withdraw() {
+  const userId = Number(localStorage.getItem("userId"));
+  const [accounts, setAccounts] = useState([]);
+  const [accNo, setAccNo] = useState("");
+  const [amount, setAmount] = useState("");
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const r = await getAccountsByUserId(userId);
+        setAccounts(r.data || []);
+        if ((r.data || []).length) setAccNo(r.data[0].accountNo ?? r.data[0].accNo);
+      } catch (err) {
+        console.error(err);
+      }
+    }
+    load();
+  }, [userId]);
+
+  async function handleWithdraw() {
+    try {
+      const res = await withdraw({ accNo, amount });
+      alert("Withdraw successful. New balance: " + res.data);
+      navigate("/customer-dashboard");
+    } catch (err) {
+      console.error(err);
+      alert("Withdraw failed");
+    }
+  }
+
+  return (
+    <div style={{ padding: 20 }}>
+      <h3>Withdraw</h3>
+      <div>
+        <label>Account</label>
+        <select value={accNo} onChange={(e) => setAccNo(e.target.value)}>
+          <option value="">--choose--</option>
+          {accounts.map((a) => (
+            <option key={a.accountNo ?? a.accNo} value={a.accountNo ?? a.accNo}>
+              {a.accountNo ?? a.accNo} - {a.balance ?? a.currentBalance}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div style={{ marginTop: 8 }}>
+        <input placeholder="Amount" value={amount} onChange={(e) => setAmount(e.target.value)} />
+      </div>
+      <div style={{ marginTop: 12 }}>
+        <button onClick={handleWithdraw}>Submit Withdraw</button>
+      </div>
+    </div>
+  );
+}
+
+
+---
+
+10) src/pages/Transfer.jsx
+
+// src/pages/Transfer.jsx
+import React, { useEffect, useState } from "react";
+import { getAccountsByUserId, transfer } from "../api/customerApi";
+import { useNavigate } from "react-router-dom";
+
+export default function Transfer() {
+  const userId = Number(localStorage.getItem("userId"));
+  const [accounts, setAccounts] = useState([]);
+  const [fromAcc, setFromAcc] = useState("");
+  const [toAcc, setToAcc] = useState("");
+  const [amount, setAmount] = useState("");
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const r = await getAccountsByUserId(userId);
+        setAccounts(r.data || []);
+        if ((r.data || []).length) setFromAcc(r.data[0].accountNo ?? r.data[0].accNo);
+      } catch (err) {
+        console.error(err);
+      }
+    }
+    load();
+  }, [userId]);
+
+  async function handleTransfer() {
+    try {
+      const r = await transfer({ fromAcc, toAcc, amount });
+      alert("Transfer successful");
+      navigate("/customer-dashboard");
+    } catch (err) {
+      console.error(err);
+      alert("Transfer failed");
+    }
+  }
+
+  return (
+    <div style={{ padding: 20 }}>
+      <h3>Transfer</h3>
+      <div>
+        <label>From</label>
+        <select value={fromAcc} onChange={(e) => setFromAcc(e.target.value)}>
+          <option value="">--choose--</option>
+          {accounts.map((a) => (
+            <option key={a.accountNo ?? a.accNo} value={a.accountNo ?? a.accNo}>
+              {a.accountNo ?? a.accNo}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div style={{ marginTop: 8 }}>
+        <label>To (account no)</label>
+        <input value={toAcc} onChange={(e) => setToAcc(e.target.value)} placeholder="destination account" />
+      </div>
+      <div style={{ marginTop: 8 }}>
+        <input placeholder="Amount" value={amount} onChange={(e) => setAmount(e.target.value)} />
+      </div>
+      <div style={{ marginTop: 12 }}>
+        <button onClick={handleTransfer}>Transfer</button>
+      </div>
+    </div>
+  );
+}
+
+
+---
+
+11) src/pages/Profile.jsx (view & edit)
+
+// src/pages/Profile.jsx
+import React, { useEffect, useState } from "react";
+import { getCustomerByCustId } from "../api/customerApi";
+import { useNavigate } from "react-router-dom";
+
+export default function Profile() {
+  const navigate = useNavigate();
+  const [customer, setCustomer] = useState(null);
+  const custId = Number(localStorage.getItem("custId") || "");
+
+  useEffect(() => {
+    async function load() {
+      try {
+        if (!custId) return;
+        const r = await getCustomerByCustId(custId);
+        setCustomer(r.data);
+      } catch (err) {
+        console.error(err);
+      }
+    }
+    load();
+  }, [custId]);
+
+  return (
+    <div style={{ padding: 20 }}>
+      <h3>Profile</h3>
+      {customer ? (
+        <div>
+          <p>Name: {customer.fullName || customer.name}</p>
+          <p>Email: {customer.email}</p>
+          <p>Phone: {customer.phone}</p>
+          {/* You can add edit functionality */}
+        </div>
+      ) : (
+        <div>No profile loaded</div>
+      )}
+      <button onClick={() => navigate(-1)}>Back</button>
+    </div>
+  );
+}
+
+
+---
+
+How to wire routes quickly
+
+Add routes (example using react-router-dom):
+
+// in your main routes file (e.g. App.jsx or AppRoutes.jsx)
+import CustomerLogin from "./pages/CustomerLogin";
+import Customer_Dashboard from "./pages/Customer_Dashboard";
+import CustomerPasswordChange from "./pages/CustomerPasswordChange";
+import ViewAccount from "./pages/ViewAccount";
+import MiniStatement from "./pages/MiniStatement";
+import Deposit from "./pages/Deposit";
+import Withdraw from "./pages/Withdraw";
+import Transfer from "./pages/Transfer";
+import Profile from "./pages/Profile";
+
+<Routes>
+  <Route path="/login" element={<CustomerLogin />} />
+  <Route path="/customer/change-password" element={<CustomerPasswordChange />} />
+  <Route path="/customer-dashboard" element={<Customer_Dashboard />} />
+  <Route path="/customer/accounts" element={<Customer_Dashboard />} />
+  <Route path="/customer/account/:accNo" element={<ViewAccount />} />
+  <Route path="/customer/mini-statement" element={<MiniStatement />} />
+  <Route path="/customer/deposit" element={<Deposit />} />
+  <Route path="/customer/withdraw" element={<Withdraw />} />
+  <Route path="/customer/transfer" element={<Transfer />} />
+  <Route path="/profile" element={<Profile />} />
+</Routes>
+
+
+---
+
+Final checklist for you to test
+
+1. Start backend and confirm endpoints listed above work from Postman (you already tested deposit, withdraw — good).
+
+
+2. Start frontend (npm run dev) and open browser console.
+
+
+3. Login via /login?role=CUSTOMER with a customer user — the access token, userId, fullName should be saved.
+
+
+4. Open http://localhost:5173/customer-dashboard and ensure accounts are loaded.
+
+
+5. Try deposit/withdraw from UI — should send { accNo, amount } bodies. If you see Network Error or CORS messages, open backend CORS configuration to allow your frontend origin and Authorization header.
+
+
+
+
+---
+
+If any of my assumed endpoints differ (for example: GET /accounts/user/{id} vs /accounts/customer/{id} or different transfer path), tell me the exact endpoint path and I'll update the small snippet(s).
+
+Would you like me to:
+
+a) make the UI prettier (styled with CSS / your app CSS), or
+
+b) keep this minimal and functional so you can drop it in and test quickly?
+
+
+Tell me which and I’ll tweak right away.
